@@ -1,0 +1,22 @@
+[project]
+name = "drify-market-data-pipeline"
+version = "0.1.0"
+description = "MVP ingestion service for streaming NIFTY LTP from KiteConnect to Amazon Kinesis."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "boto3>=1.35.0",
+    "kiteconnect>=5.0.1",
+    "python-dotenv>=1.0.1",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
