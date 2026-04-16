@@ -1,0 +1,195 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: DriFy market data pipeline with Kinesis Data Streams, Firehose, S3, and Parquet conversion.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: drify
+    AllowedPattern: "[a-z0-9-]+"
+  EnvironmentName:
+    Type: String
+    Default: dev
+    AllowedPattern: "[a-z0-9-]+"
+  KinesisShardCount:
+    Type: Number
+    Default: 1
+    MinValue: 1
+  FirehoseBufferIntervalSeconds:
+    Type: Number
+    Default: 60
+    MinValue: 60
+    MaxValue: 900
+  FirehoseBufferSizeMBs:
+    Type: Number
+    Default: 64
+    MinValue: 64
+    MaxValue: 128
+
+Resources:
+  DataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${ProjectName}-${EnvironmentName}-${AWS::AccountId}-${AWS::Region}-ticks"
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  FirehoseLogsGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/kinesisfirehose/${ProjectName}-${EnvironmentName}-ticks"
+      RetentionInDays: 14
+
+  FirehoseLogsStream:
+    Type: AWS::Logs::LogStream
+    Properties:
+      LogGroupName: !Ref FirehoseLogsGroup
+      LogStreamName: S3Delivery
+
+  MarketDataStream:
+    Type: AWS::Kinesis::Stream
+    Properties:
+      Name: !Sub "${ProjectName}-${EnvironmentName}-market-data"
+      RetentionPeriodHours: 24
+      ShardCount: !Ref KinesisShardCount
+      StreamModeDetails:
+        StreamMode: PROVISIONED
+
+  GlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: !Sub "${ProjectName}_${EnvironmentName}_market_data"
+
+  GlueTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref GlueDatabase
+      TableInput:
+        Name: tick_events
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          classification: json
+          typeOfData: file
+        StorageDescriptor:
+          Columns:
+            - Name: event_time
+              Type: string
+            - Name: instrument
+              Type: string
+            - Name: instrument_token
+              Type: int
+            - Name: ltp
+              Type: double
+            - Name: exchange_timestamp
+              Type: string
+            - Name: ingestion_time
+              Type: string
+          Location: !Sub "s3://${DataBucket}/ticks/"
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+
+  FirehoseRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-${EnvironmentName}-firehose-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: firehose.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: FirehoseDeliveryPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:AbortMultipartUpload
+                  - s3:GetBucketLocation
+                  - s3:GetObject
+                  - s3:ListBucket
+                  - s3:ListBucketMultipartUploads
+                  - s3:PutObject
+                Resource:
+                  - !GetAtt DataBucket.Arn
+                  - !Sub "${DataBucket.Arn}/*"
+              - Effect: Allow
+                Action:
+                  - kinesis:DescribeStream
+                  - kinesis:DescribeStreamSummary
+                  - kinesis:GetRecords
+                  - kinesis:GetShardIterator
+                  - kinesis:ListShards
+                Resource: !GetAtt MarketDataStream.Arn
+              - Effect: Allow
+                Action:
+                  - glue:GetDatabase
+                  - glue:GetTable
+                  - glue:GetTableVersion
+                  - glue:GetTableVersions
+                Resource:
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog"
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/${GlueDatabase}"
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/${GlueDatabase}/tick_events"
+              - Effect: Allow
+                Action:
+                  - logs:PutLogEvents
+                Resource: !GetAtt FirehoseLogsStream.Arn
+
+  FirehoseDeliveryStream:
+    Type: AWS::KinesisFirehose::DeliveryStream
+    Properties:
+      DeliveryStreamName: !Sub "${ProjectName}-${EnvironmentName}-tick-events"
+      DeliveryStreamType: KinesisStreamAsSource
+      KinesisStreamSourceConfiguration:
+        KinesisStreamARN: !GetAtt MarketDataStream.Arn
+        RoleARN: !GetAtt FirehoseRole.Arn
+      ExtendedS3DestinationConfiguration:
+        BucketARN: !GetAtt DataBucket.Arn
+        RoleARN: !GetAtt FirehoseRole.Arn
+        Prefix: ticks/year=!{timestamp:yyyy}/month=!{timestamp:MM}/day=!{timestamp:dd}/
+        ErrorOutputPrefix: errors/!{firehose:error-output-type}/year=!{timestamp:yyyy}/month=!{timestamp:MM}/day=!{timestamp:dd}/
+        BufferingHints:
+          IntervalInSeconds: !Ref FirehoseBufferIntervalSeconds
+          SizeInMBs: !Ref FirehoseBufferSizeMBs
+        CompressionFormat: UNCOMPRESSED
+        CloudWatchLoggingOptions:
+          Enabled: true
+          LogGroupName: !Ref FirehoseLogsGroup
+          LogStreamName: !Ref FirehoseLogsStream
+        DataFormatConversionConfiguration:
+          Enabled: true
+          InputFormatConfiguration:
+            Deserializer:
+              OpenXJsonSerDe: {}
+          OutputFormatConfiguration:
+            Serializer:
+              ParquetSerDe: {}
+          SchemaConfiguration:
+            DatabaseName: !Ref GlueDatabase
+            RoleARN: !GetAtt FirehoseRole.Arn
+            TableName: tick_events
+            Region: !Ref AWS::Region
+            VersionId: LATEST
+
+Outputs:
+  KinesisStreamName:
+    Value: !Ref MarketDataStream
+  FirehoseDeliveryStreamName:
+    Value: !Ref FirehoseDeliveryStream
+  S3BucketName:
+    Value: !Ref DataBucket
+  GlueDatabaseName:
+    Value: !Ref GlueDatabase
+  GlueTableName:
+    Value: tick_events

@@ -14,8 +14,9 @@ This repository contains the MVP ingestion service for streaming one instrument 
 1. Create a Python virtual environment.
 2. Install the project in editable mode.
 3. Copy `.env.example` to `.env` and fill in KiteConnect and AWS values.
-4. Run the service locally from VS Code.
-5. After validation, deploy the same service to EC2.
+4. Provision AWS resources for Kinesis, Firehose, Glue, and S3.
+5. Run the service locally from VS Code for validation.
+6. Deploy the same service to EC2.
 
 ## Local setup
 
@@ -25,6 +26,45 @@ python -m venv .venv
 pip install -e .
 Copy-Item .env.example .env
 python -m drify_ingestor.main
+```
+
+## AWS resource setup
+
+The repository now includes a starter CloudFormation stack at `infra/firehose_parquet_stack.yaml`.
+
+1. Deploy the stack:
+
+```powershell
+aws cloudformation deploy `
+  --template-file infra/firehose_parquet_stack.yaml `
+  --stack-name drify-market-data `
+  --capabilities CAPABILITY_NAMED_IAM `
+  --parameter-overrides ProjectName=drify EnvironmentName=prod
+```
+
+2. Collect the output values for:
+   - `KinesisStreamName`
+   - `S3BucketName`
+   - `FirehoseDeliveryStreamName`
+3. Put the `KinesisStreamName` and AWS region into `.env` on your EC2 instance.
+4. Attach an IAM role to EC2 that can call `kinesis:PutRecord` on the created stream.
+5. After the app starts publishing JSON into Kinesis Data Streams, Firehose will read the stream and land Parquet files under `s3://<bucket>/ticks/...`.
+
+## EC2 runtime setup
+
+On the EC2 box, keep the application environment very close to local:
+
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -e .
+python -m drify_ingestor.main
+```
+
+If you are using Amazon Linux instead of Windows on EC2, the activate command becomes:
+
+```bash
+source .venv/bin/activate
 ```
 
 ## Environment variables
@@ -55,7 +95,6 @@ Each tick is converted into a compact JSON event before being pushed to Kinesis:
 
 ## Recommended next steps
 
-- Create the AWS resources: `Kinesis Data Stream`, `Firehose`, and `S3`
-- Add a Glue catalog table once files begin landing in S3
-- Package and deploy this service on EC2
-
+- Verify records are visible in the Kinesis stream metrics
+- Confirm Firehose is writing Parquet files into the S3 `ticks/` prefix
+- Add Athena or Glue crawlers for downstream querying if needed
